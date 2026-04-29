@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 print("--- 🚀 เริ่มต้นการอัปโหลดข้อมูล ---")
 
 # Step 1: อ่านไฟล์
-print("1. กำลังอ่านไฟล์ Sre....")
+print("1. กำลังอ่านไฟล์ ....")
 try:
     df = pd.read_csv('Sre.csv', encoding='utf-8', low_memory=False)
     print(f"✅ อ่านไฟล์สำเร็จ! เจอข้อมูลทั้งหมด {len(df)} แถว")
@@ -28,6 +28,6 @@ except Exception as e:
 print("3. กำลังดันข้อมูลครึ่งล้านแถวลงตาราง Sreport (นั่งจิบน้ำรอเลยสัส)...")
 try:
     df.to_sql('Sre', con=engine, if_exists='replace', index=False, chunksize=10000)
-    print("🎉 โคตรแจ่ม!! ดันข้อมูลเข้า MySQL เสร็จสมบูรณ์ 100% แล้วสัส!!")
+    print("🎉 โคตรแจ่ม!! ดันข้อมูลเข้า MySQL เสร็จสมบูรณ์ 100% ")
 except Exception as e:
     print(f"❌ พังตอนดันข้อมูลลง Database!: {e}")
