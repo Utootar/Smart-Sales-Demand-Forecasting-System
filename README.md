@@ -1,4 +1,4 @@
-# Smart-Sales-Demand-Forecasting-System
+# Smart-Sales-Demand-Forecasting-System ()DEMO
 An Inventory &amp; Sales Management system integrated with Statistical Analysis, featuring ABC Classification, Trend Analysis, and Demand Forecasting using Moving Average models.
 
 Methodology
