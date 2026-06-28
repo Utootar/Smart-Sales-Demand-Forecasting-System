@@ -1,19 +1,6 @@
 """
-🏛️ Enterprise AI Data Analytics Platform  — Production-Ready Refactor
+ AI Data Analytics Platform  — AI Agent & Smart ETL Edition (2026)
 ======================================================================
-Bug-fixes & performance improvements over the submitted version:
-
-  [CRIT] API key hardcoded → moved to st.secrets["GEMINI_API_KEY"]
-  [BUG]  gemini-3.5-flash (doesn't exist) → gemini-1.5-flash
-  [BUG]  genai.configure() in global scope (runs every rerun) → @st.cache_resource
-  [BUG]  .fillna(inplace=True) on copy → assignment without inplace
-  [BUG]  datetime detection via col name ("date","update") → dtype check first
-  [BUG]  preds[:100] silent truncation → min(100, len(preds))
-  [BUG]  VIF no guard on perfect multicollinearity → try/except per feature
-  [PERF] profile_dataset uncached → @st.cache_data(hash_df)
-  [PERF] auto_etl_engine uncached → @st.cache_data
-  [PERF] ML training reruns every interaction → @st.cache_data
-  [PERF] get_engine called with varying args → stable key pattern
 """
 
 import warnings
@@ -51,7 +38,7 @@ TRAIN_SPLIT_RATIO  = 0.80
 MIN_ROWS_REQUIRED  = 30
 RANDOM_STATE       = 42
 SYSTEM_DBS         = {"information_schema", "performance_schema", "sys", "mysql"}
-MAX_PREVIEW_ROWS   = 100   # chart/display sample cap — analysis always uses full data
+MAX_PREVIEW_ROWS   = 100   
 
 st.set_page_config(
     page_title="AI Data Analytics Studio",
@@ -75,6 +62,8 @@ _DEFAULTS = {
     "ml_results":         None,
     "stats_results":      None,
     "ai_report_output":   None,
+    "ai_agent_suggestions": None,
+    "ai_etl_code":        "",
     "nav_page":           "1. 👋 Home",
 }
 for k, v in _DEFAULTS.items():
@@ -82,17 +71,11 @@ for k, v in _DEFAULTS.items():
 
 
 # ─────────────────────────────────────────────
-# 🤖  GEMINI CLIENT  (cached — one configure() per process)
+# 🤖  GEMINI CLIENT  (cached)
 # ─────────────────────────────────────────────
 
 @st.cache_resource
 def _get_gemini():
-    """
-    Initialise Gemini once per process lifetime.
-    Key MUST live in .streamlit/secrets.toml:
-        GEMINI_API_KEY = ""
-    Never hardcode credentials in source.
-    """
     try:
         import google.generativeai as _g
         key = st.secrets.get("GEMINI_API_KEY", "")
@@ -112,7 +95,7 @@ def call_gemini(prompt: str) -> str:
             "```toml\nGEMINI_API_KEY = \"your-key-here\"\n```"
         )
     try:
-        # FIX: gemini-3.5-flash doesn't exist → gemini-1.5-flash
+        # ตัวแรงของมึง รันผ่านฉลุยจัดไปยาวๆ มึงตอง!
         model = g.GenerativeModel("gemini-3.5-flash")
         return model.generate_content(prompt).text
     except Exception as e:
@@ -134,17 +117,11 @@ def get_engine(host: str, user: str, pw: str, db: str = ""):
 
 
 # ─────────────────────────────────────────────
-# 🔍  DATA PROFILING  (cached — heavy on large DFs)
+# 🔍  DATA PROFILING  (cached)
 # ─────────────────────────────────────────────
 
 @st.cache_data(show_spinner="Profiling data…")
 def profile_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    FIX: Added @st.cache_data — previously re-ran on every widget interaction.
-    FIX: datetime detection now checks actual dtype first, then falls back to
-         name heuristic with a tighter pattern (/date$|_date|^date/) to avoid
-         false positives on columns like 'update', 'candidate', 'mandate'.
-    """
     report = []
     n = len(df)
     for col in df.columns:
@@ -152,13 +129,11 @@ def profile_dataset(df: pd.DataFrame) -> pd.DataFrame:
         null_pct   = null_count / n * 100 if n else 0
         n_unique   = int(df[col].nunique())
 
-        # Type detection — dtype check is authoritative; name is last resort
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             dtype_group = "Datetime"
         elif pd.api.types.is_numeric_dtype(df[col]):
             dtype_group = "Numerical"
         else:
-            # Only use name heuristic with tight pattern (avoids 'update', 'candidate')
             import re
             if re.search(r'(^date|_date$|date_|_time$|^time_)', col.lower()):
                 dtype_group = "Datetime"
@@ -185,20 +160,12 @@ def profile_dataset(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 🔧  AUTO ETL ENGINE  (cached)
+# 🔧  STANDARD ETL ENGINE  (Baseline cached)
 # ─────────────────────────────────────────────
 
-@st.cache_data(show_spinner="Running Auto ETL…")
+@st.cache_data(show_spinner="Running Standard ETL…")
 def auto_etl_engine(df: pd.DataFrame, _profile_hash: str) -> tuple:
-    """
-    FIX: @st.cache_data prevents re-running on every widget touch.
-    FIX: Removed .fillna(inplace=True) on slice — now uses assignment
-         to avoid SettingWithCopyWarning and potential silent no-ops.
-    FIX: raw df is never modified; we work on a copy throughout.
-    """
-    # Rebuild profile inside (can't pass DataFrame to cached fn without hash issue)
     profile = profile_dataset(df)
-
     cleaned = df.copy()
     outlier_report: dict = {}
 
@@ -206,12 +173,13 @@ def auto_etl_engine(df: pd.DataFrame, _profile_hash: str) -> tuple:
         col   = row["Column"]
         dtype = row["Detected Type"]
 
-        # ── Impute missing values (assignment, NOT inplace) ──────
+        if dtype == "Datetime":
+            cleaned[col] = pd.to_datetime(cleaned[col], errors='coerce')
+
         if cleaned[col].isnull().sum() > 0:
             if dtype == "Numerical":
-                skew   = cleaned[col].skew()
-                fill   = cleaned[col].median() if abs(skew) > 1 else cleaned[col].mean()
-                # FIX: direct assignment, no inplace=True on slice
+                skew = cleaned[col].skew()
+                fill = cleaned[col].median() if abs(skew) > 1 else cleaned[col].mean()
                 cleaned[col] = cleaned[col].fillna(fill)
             elif dtype == "Categorical":
                 if cleaned[col].nunique() / max(len(cleaned), 1) < 0.1:
@@ -219,7 +187,6 @@ def auto_etl_engine(df: pd.DataFrame, _profile_hash: str) -> tuple:
                 else:
                     cleaned[col] = cleaned[col].fillna("Unknown_Category")
 
-        # ── Outlier classification (IQR + Z-score) ──────────────
         if dtype == "Numerical":
             q1, q3 = cleaned[col].quantile(0.25), cleaned[col].quantile(0.75)
             iqr    = q3 - q1
@@ -235,7 +202,6 @@ def auto_etl_engine(df: pd.DataFrame, _profile_hash: str) -> tuple:
                     "Max Z-Score":    round(max_z, 2),
                 }
 
-    # Drop exact duplicates
     before = len(cleaned)
     cleaned = cleaned.drop_duplicates()
     removed = before - len(cleaned)
@@ -247,168 +213,6 @@ def auto_etl_engine(df: pd.DataFrame, _profile_hash: str) -> tuple:
         }
 
     return cleaned, outlier_report
-
-
-# ─────────────────────────────────────────────
-# 🤖  ML TRAINING  (cached — prevents retraining on every rerun)
-# ─────────────────────────────────────────────
-
-@st.cache_data(show_spinner="Training models…")
-def run_automl(
-    _df_hash: str,
-    feature_cols: tuple,     # tuple for hashability
-    target_col: str,
-    is_timeseries: bool,
-    date_col: str | None,
-) -> dict:
-    """
-    FIX: @st.cache_data prevents full model retraining on every widget interaction.
-    Accepts tuple of feature_cols (lists aren't hashable for cache keys).
-    """
-    # Reconstruct df from session (already cleaned)
-    df = st.session_state["cleaned_data"]
-    features = list(feature_cols)
-
-    X = df[features]
-    y = df[target_col]
-
-    # Split strategy
-    if is_timeseries and date_col:
-        df_s = df.sort_values(by=date_col)
-        X    = df_s[features]
-        y    = df_s[target_col]
-        cut  = int(len(df_s) * TRAIN_SPLIT_RATIO)
-        X_train, X_test = X.iloc[:cut], X.iloc[cut:]
-        y_train, y_test = y.iloc[:cut], y.iloc[cut:]
-        split_type = "Chronological (Time Series)"
-    else:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=1 - TRAIN_SPLIT_RATIO,
-            random_state=RANDOM_STATE, shuffle=True,
-        )
-        split_type = "Random Shuffle"
-
-    is_regression = pd.api.types.is_numeric_dtype(y) and y.nunique() > 10
-
-    if is_regression:
-
-     models = {
-        "Linear Regression": LinearRegression(),
-
-        "Random Forest Regressor":
-            RandomForestRegressor(
-                n_estimators=200,
-                random_state=RANDOM_STATE,
-                n_jobs=-1
-            ),
-
-        "Gradient Boosting Regressor":
-            GradientBoostingRegressor(
-                n_estimators=200,
-                random_state=RANDOM_STATE
-            ),
-    }
-
-    else:
-
-     models = {
-        "Logistic Regression":
-            LogisticRegression(
-                max_iter=1000,
-                random_state=RANDOM_STATE
-            ),
-
-        "Random Forest Classifier":
-            RandomForestClassifier(
-                n_estimators=200,
-                random_state=RANDOM_STATE,
-                n_jobs=-1
-            ),
-
-        "Gradient Boosting Classifier":
-            GradientBoostingClassifier(
-                random_state=RANDOM_STATE
-            ),
-    }
-
-    results  = []
-    best_preds = None
-    best_r2    = -np.inf
-    best_name  = ""
-
-    for name, estimator in models.items():
-        try:
-            num_sub = X_train.select_dtypes(include=["number"]).columns.tolist()
-            cat_sub = X_train.select_dtypes(include=["object"]).columns.tolist()
-
-            transformers = []
-            if num_sub:
-                transformers.append(("num", StandardScaler(), num_sub))
-            if cat_sub:
-                transformers.append(("cat", OneHotEncoder(handle_unknown="ignore",
-                                                           sparse_output=False), cat_sub))
-
-            pipe = Pipeline([
-                ("pre", ColumnTransformer(transformers, remainder="drop")),
-                ("model", estimator),
-            ])
-            pipe.fit(X_train, y_train)
-            preds = pipe.predict(X_test)
-
-            if is_regression:
-
-                r2 = float(r2_score(y_test, preds))
-                rmse = float(np.sqrt(mean_squared_error(y_test, preds)))
-                mae = float(mean_absolute_error(y_test, preds))
-                n = len(y_test)
-                p = X_test.shape[1]
-                adj_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1) if (n - p - 1) > 0 else r2
-            else:
-                r2 = float(accuracy_score(y_test, preds))
-                rmse = None
-                mae = float(
-                f1_score(
-                y_test,
-                preds,
-                average="weighted"
-        )
-    )
-
-            results.append({
-                "Model":    name,
-                "R²":       round(r2, 4),
-                "Adj R²":   round(adj_r2, 4) if is_regression else None,
-                "RMSE":     round(rmse, 4),
-                "MAE":      round(mae, 4),
-                "Status":   "✅ OK",
-            })
-
-            if r2 > best_r2:
-                best_r2    = r2
-                best_name  = name
-                # FIX: cap preview at min(100, actual test size) — no silent truncation
-                n_preview  = min(MAX_PREVIEW_ROWS, len(y_test))
-                best_preds = {
-                    "actual": y_test.values[:n_preview].tolist(),
-                    "pred":   preds[:n_preview].tolist(),
-                    "n_preview": n_preview,
-                    "n_total":   len(y_test),
-                }
-
-        except Exception as exc:
-            results.append({"Model": name, "R²": None, "Adj R²": None,
-                             "RMSE": None, "MAE": None, "Status": f"❌ {exc}"})
-
-    return {
-        "scores_df":    pd.DataFrame(results),
-        "best_name":    best_name,
-        "best_r2":      best_r2,
-        "best_preds":   best_preds,
-        "split_type":   split_type,
-        "train_size":   len(X_train),
-        "test_size":    len(X_test),
-        "is_regression":is_regression,
-    }
 
 
 # ─────────────────────────────────────────────
@@ -453,7 +257,7 @@ with st.sidebar:
             "2. 📥 Ingest & Connection",
             "3. 🔍 Data Profiling & Quality",
             "4. 🔬 Statistical Analysis",
-            "5. 🤖 Automated Machine Learning",
+            "5. 🤖 AI Data Agent Workspace",
             "6. 📋 AI Executive Report",
         ],
         key="nav_page",
@@ -471,17 +275,15 @@ if "1." in page:
     c1, c2, c3 = st.columns(3)
     c1.metric("📊 Data Status",  "✅ Loaded" if has_data else "⏳ No Data")
     c2.metric("🔬 Stats Engine", "✅ Ready"  if st.session_state["stats_results"] else "—")
-    c3.metric("🤖 Best ML Model",
-              st.session_state["ml_results"]["best_name"]
-              if st.session_state["ml_results"] else "—")
+    c3.metric("🤖 AI Agent Status", "🔥 Active & Smart" if has_data else "—")
 
     st.markdown("---")
     st.markdown("""
     **ขั้นตอนการใช้งาน:**
     1. **📥 Ingest** — โหลด CSV / Excel หรือเชื่อมต่อ MySQL table
-    2. **🔍 Profiling** — ดู data quality report และผล Auto ETL
+    2. **🔍 Profiling** — เลือกโหมดการคลีนข้อมูลระหว่างสูตรสถิติพื้นฐาน หรือให้ AI เขียนสคริปต์ทำ Smart ETL 
     3. **🔬 Stats** — Correlation, OLS, VIF, ANOVA อัตโนมัติ
-    4. **🤖 AutoML** — เปรียบเทียบ 3 โมเดล หาตัวที่ดีที่สุด
+    4. **🤖 AI Agent Workspace** — มอบหมายให้ AI วิเคราะห์ข้อมูล ออกแบบสถิติ และพล็อตกราฟแบบไดนามิกตามจริง
     5. **📋 AI Report** — รายงานผู้บริหารจาก Gemini AI
     """)
 
@@ -502,7 +304,7 @@ elif "2." in page:
                 df = (pd.read_csv(uploaded) if uploaded.name.endswith(".csv")
                       else pd.read_excel(uploaded))
                 st.session_state["raw_data"]    = df
-                st.session_state["cleaned_data"] = None  # reset downstream
+                st.session_state["cleaned_data"] = None
                 st.session_state["data_profile"] = profile_dataset(df)
                 st.success(f"✅ {uploaded.name} — {df.shape[0]:,} rows × {df.shape[1]} cols")
                 st.dataframe(df.head(10), use_container_width=True)
@@ -565,11 +367,11 @@ elif "2." in page:
 
 
 # ═════════════════════════════════════════════
-# PAGE 3 — DATA PROFILING & ETL
+# PAGE 3 — DATA PROFILING & 🔥 AI SMART ETL
 # ═════════════════════════════════════════════
 elif "3." in page:
     _back_btn()
-    st.title("🔍 Data Profiling & Quality Engine")
+    st.title("🔍 Data Profiling & Smart ETL Pipeline")
 
     if st.session_state["raw_data"] is None:
         st.warning("กรุณาโหลดข้อมูลที่หน้า Ingest ก่อน"); st.stop()
@@ -581,32 +383,76 @@ elif "3." in page:
     st.dataframe(prof_df, use_container_width=True)
 
     st.markdown("---")
+    st.subheader("🔧 Data Cleansing & ETL Configuration")
+    
+    # ทางเลือกทำ ETL ระหว่างสูตรคณิตสถิติดั้งเดิม กับ ดึงพลัง AI เข้ามาช่วยเขียนโค้ดล้างตรงตามเนื้อผ้าจริง
+    etl_mode = st.radio(
+        "เลือกสถาปัตยกรรมการคลีนข้อมูล (ETL Pipeline Mode)",
+        ["สถิติพื้นฐานตามสเกล (Standard Statistical Imputation)", "🔥 ปลดล็อก AI Agent ออกแบบสคริปต์คลีนข้อมูลตามจริง (AI-Driven Smart ETL)"]
+    )
 
-    # Run ETL — result is cached; won't rerun unless raw_df changes
-    cleaned, outlier_info = auto_etl_engine(raw_df, str(raw_df.shape) + str(raw_df.columns.tolist()))
-    st.session_state["cleaned_data"] = cleaned
+    if "สถิติพื้นฐาน" in etl_mode:
+        cleaned, outlier_info = auto_etl_engine(raw_df, str(raw_df.shape) + str(raw_df.columns.tolist()))
+        st.session_state["cleaned_data"] = cleaned
+        st.success("✅ ระบบใช้ Pipeline สถิติแบบดั้งเดิมคำนวณเติมค่าเฉลี่ยสำเร็จ")
+    else:
+        st.info("โหมด AI Smart ETL: ระบบจะส่งโครงสร้างคอลัมน์ไปให้ AI วิเคราะห์เชิงตรรกะ เพื่อเขียนโค้ดกลับมาล้างข้อมูลและเติมค่าว่างให้สมเหตุสมผลที่สุด")
+        
+        if st.button("⚡ สั่ง AI Agent เริ่มวิเคราะห์และเขียนสคริปต์ทำ Smart ETL", type="primary", use_container_width=True):
+            with st.spinner("AI กำลังแกะตรรกะชุดข้อมูลและร่างสคริปต์ล้างข้อมูลความเร็วสูง..."):
+                schema_context = f"Columns: {raw_df.columns.tolist()}\nNull Counts:\n{raw_df.isnull().sum().to_string()}\nHead Sample:\n{raw_df.head(3).to_string()}"
+                
+                etl_prompt = (
+                    f"คุณคือ Senior Data Engineer ผู้เชี่ยวชาญด้านการทำ Data Cleansing และ Advanced ETL Pipeline\n"
+                    f"นี่คือชุดข้อมูลดิบที่มีปัญหาช่องว่างหรือสิ่งสกปรก: {schema_context}\n\n"
+                    f"หน้าที่ของคุณคือเขียนโค้ด Python เพื่อล้างข้อมูลบนตัวแปร `df` (มีอยู่แล้วในระบบ ห้ามโหลดใหม่) โดยมีเงื่อนไขตามหลักการจัดการสถิติระดับสากล:\n"
+                    f"1. การทำ Imputation (เติมค่าว่าง): ห้ามใช้ค่า Mean/Median โง่ๆ หยอดใส่ทุกคอลัมน์ดื้อๆ แต่ให้วิเคราะห์เชิงตรรกะมนุษย์ (เช่น หากเป็นข้อมูลฟาร์ม/โรคพืช/หรือโรงพยาบาล ให้ประเมินค่าที่เหมาะสมตามความสัมพันธ์ของแถวและคอลัมน์ข้างเคียง หรือเติมหมวดหมู่ตามความน่าจะเป็นเชิงลึก)\n"
+                    f"2. จัดการกับ Text Inconsistency: สั่งแก้ปัญหาข้อมูลสตริงที่สะกดเพี้ยน คลีนช่องว่างส่วนเกิน คลีนพิมพ์เล็กใหญ่ให้สม่ำเสมอ\n"
+                    f"3. แปลงคอลัมน์เวลา: หากเจอคอลัมน์ไหนส่อแววเป็น วันที่/เวลา ให้ใช้คำสั่ง `pd.to_datetime(df[col], errors='coerce')` เสมอ เพื่อส่งต่อไปรันในโหมด Time Series หน้า 5 ได้\n"
+                    f"4. ส่งกลับผลลัพธ์มาเฉพาะบล็อกโค้ดในรูปแบบเครื่องหมาย ```python ... ``` เท่านั้น ห้ามเขียนคำอธิบายเชิงพรรณนาเด็ดขาด โค้ดของมึงจะถูกนำไปใช้ในคำสั่ง exec() ทันที!"
+                )
+                
+                ai_etl_raw = call_gemini(etl_prompt)
+                
+                # ทำการ Parser ตัดแต่งเอาเฉพาะสคริปต์โค้ดบริสุทธิ์
+                if "```python" in ai_etl_raw:
+                    st.session_state["ai_etl_code"] = ai_etl_raw.split("```python")[1].split("```")[0]
+                elif "```" in ai_etl_raw:
+                    st.session_state["ai_etl_code"] = ai_etl_raw.split("```")[1].split("```")[0]
+                else:
+                    st.session_state["ai_etl_code"] = ai_etl_raw
 
-    st.subheader("🔧 Auto ETL Results")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Missing Values — Before vs After**")
+        if st.session_state["ai_etl_code"]:
+            # สร้าง Environment ในการรันสคริปต์ที่ AI ส่งมาสดๆ
+            df_working = raw_df.copy()
+            execution_scope = {
+                "pd": pd,
+                "np": np,
+                "df": df_working
+            }
+            try:
+                exec(st.session_state["ai_etl_code"], globals(), execution_scope)
+                # ดึงผลลัพธ์ DataFrame ที่ถูกชำระล้างโดยสคริปต์ AI เรียบร้อยแล้วกลับมาเซฟลงระบบหลัก
+                st.session_state["cleaned_data"] = execution_scope["df"]
+                st.success("🎯 AI Smart ETL ดำเนินการล้างข้อมูลและแก้ไขตรรกะในหน่วยความจำเรียบร้อย!")
+                with st.expander("🛠️ เปิดดูสคริปต์ล้างข้อมูล (Advanced ETL Pipeline) ที่ AI เขียนขึ้นมา"):
+                    st.code(st.session_state["ai_etl_code"], language="python")
+            except Exception as etl_err:
+                st.error(f"❌ สคริปต์ ETL ของ AI เกิดข้อผิดพลาดทางเทคนิค: {etl_err}")
+                st.info("ระบบทำการสลับกลับไปใช้โครงสร้าง Pipeline สถิติพื้นฐานเพื่อเซฟตี้โมเดลไม่ให้แครช")
+                cleaned, _ = auto_etl_engine(raw_df, str(raw_df.shape) + str(raw_df.columns.tolist()))
+                st.session_state["cleaned_data"] = cleaned
+
+    # แสดงผลการเปรียบเทียบบนหน้าจอให้เห็นความแตกต่างชัดเจน
+    if st.session_state["cleaned_data"] is not None:
+        cleaned_df = st.session_state["cleaned_data"]
+        st.subheader("📊 ตารางเปรียบเทียบ Missing Values (ก่อนล้าง VS หลังล้าง)")
         missing_cmp = pd.DataFrame({
-            "Raw":     raw_df.isnull().sum(),
-            "Cleaned": cleaned.isnull().sum(),
+            "ข้อมูลดิบก่อนล้าง (Raw)": raw_df.isnull().sum(),
+            "ข้อมูลที่ผ่านสมองกลล้างแล้ว (Cleaned)": cleaned_df.isnull().sum(),
         })
-        st.dataframe(missing_cmp[missing_cmp["Raw"] > 0], use_container_width=True)
+        st.dataframe(missing_cmp[missing_cmp["ข้อมูลดิบก่อนล้าง (Raw)"] > 0], use_container_width=True)
 
-    with c2:
-        st.markdown("**Outlier Classification (IQR + Z-Score)**")
-        if outlier_info:
-            st.dataframe(
-                pd.DataFrame(outlier_info).T.reset_index().rename(columns={"index": "Column"}),
-                use_container_width=True,
-            )
-        else:
-            st.success("ไม่พบ Outliers ผิดปกติ")
-
-    # AI column analysis (on demand)
     st.markdown("---")
     if st.button("🧠 AI วิเคราะห์ความหมายคอลัมน์"):
         with st.spinner("Gemini กำลังวิเคราะห์…"):
@@ -629,7 +475,7 @@ elif "4." in page:
     st.title("🔬 Dynamic Statistical Engine")
 
     if st.session_state["cleaned_data"] is None:
-        st.warning("กรุณารัน Auto ETL ที่หน้า Profiling ก่อน"); st.stop()
+        st.warning("กรุณารันกระบวนการล้างข้อมูลที่หน้า Profiling & Smart ETL ก่อน"); st.stop()
 
     df   = st.session_state["cleaned_data"]
     cols = df.columns.tolist()
@@ -656,7 +502,6 @@ elif "4." in page:
                 use_container_width=True,
             )
 
-        # OLS + VIF
         if pd.api.types.is_numeric_dtype(df[target_var]):
             st.markdown("### OLS Regression & VIF Diagnostics")
             num_feats = [c for c in features_x if pd.api.types.is_numeric_dtype(df[c])]
@@ -669,7 +514,6 @@ elif "4." in page:
 
                     if len(num_feats) > 1:
                         st.markdown("**VIF Table**")
-                        # FIX: _safe_vif wraps each calculation in try/except
                         st.dataframe(_safe_vif(num_sub[num_feats].astype(float).dropna()),
                                      use_container_width=True)
                     st.session_state["stats_results"] = {
@@ -678,7 +522,6 @@ elif "4." in page:
                 except Exception as e:
                     st.warning(f"OLS ข้าม: {e}")
 
-        # ANOVA
         cat_feats = [c for c in features_x
                      if df[c].dtype == object and 1 < df[c].nunique() <= 20]
         if cat_feats and pd.api.types.is_numeric_dtype(df[target_var]):
@@ -697,74 +540,94 @@ elif "4." in page:
 
 
 # ═════════════════════════════════════════════
-# PAGE 5 — AUTOML
+# PAGE 5 — AI DATA AGENT WORKSPACE (Code Interpreter)
 # ═════════════════════════════════════════════
 elif "5." in page:
     _back_btn()
-    st.title("🤖 Automated Machine Learning Studio")
+    st.title("🤖 AI Data Agent & Advanced Analytics Workspace")
 
     if st.session_state["cleaned_data"] is None:
-        st.warning("กรุณาผ่านขั้นตอน ETL ที่หน้า 3 ก่อน"); st.stop()
+        st.warning("กรุณาผ่านขั้นตอนการทำความสะอาดข้อมูลที่หน้า 3 ก่อนนะครับ"); st.stop()
 
-    df   = st.session_state["cleaned_data"]
-    cols = df.columns.tolist()
+    df = st.session_state["cleaned_data"]
+    
+    st.subheader("🕵️‍♂️ AI Data Assessment Strategy")
+    st.write("กดปุ่มด้านล่างเพื่อให้ AI สแกนเนื้อข้อมูลจริง เพื่อออกแบบกระบวนการวิเคราะห์ทางสถิติและ Machine Learning ที่ถูกต้องแม่นยำที่สุด")
 
-    c1, c2 = st.columns(2)
-    target_ml = c1.selectbox("Target Variable (Y)", cols)
-
-    date_cols = [c for c in cols if pd.api.types.is_datetime64_any_dtype(df[c])]
-    is_ts, date_col = False, None
-    if date_cols:
-        is_ts    = c2.checkbox("Enable Time Series Mode (Chronological Split)")
-        date_col = c2.selectbox("Date Column", date_cols) if is_ts else None
-
-    pot_x       = [c for c in cols if c not in {target_ml, date_col}]
-    features_ml = st.multiselect("Feature Columns (X)", pot_x, default=pot_x[:5])
-
-    if st.button("🚀 Run AutoML", type="primary", use_container_width=True):
-        if len(features_ml) < 1:
-            st.error("เลือก Feature อย่างน้อย 1 ตัว"); st.stop()
-
-        # FIX: pass tuple (hashable) so @st.cache_data key works correctly
-        res = run_automl(
-            _df_hash    = str(df.shape) + str(df.columns.tolist()),
-            feature_cols= tuple(features_ml),
-            target_col  = target_ml,
-            is_timeseries= is_ts,
-            date_col    = date_col,
-        )
-        st.session_state["ml_results"] = res
-
-    if st.session_state["ml_results"]:
-        res = st.session_state["ml_results"]
-        st.success(f"✅ Best Model: **{res['best_name']}** — R²: {res['best_r2']:.4f}")
-        st.caption(
-            f"Split: {res['split_type']} | "
-            f"Train: {res['train_size']:,} | Test: {res['test_size']:,}"
-        )
-        st.subheader("📊 Model Comparison")
-        scores = res["scores_df"]
-        st.dataframe(
-            scores.style.highlight_max(subset=["R²", "Adj R²"], color="#bbf7d0")
-                        .highlight_min(subset=["RMSE","MAE"],     color="#bbf7d0"),
-            use_container_width=True,
-        )
-
-        if res["best_preds"]:
-            bp = res["best_preds"]
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(y=bp["actual"], mode="lines+markers",
-                                     name="Actual", line=dict(color="#2563EB", width=2),
-                                     marker=dict(size=4)))
-            fig.add_trace(go.Scatter(y=bp["pred"], mode="lines",
-                                     name=f"Predicted ({res['best_name']})",
-                                     line=dict(color="#DC2626", width=2, dash="dash")))
-            cap = "" if bp["n_preview"] == bp["n_total"] else f" (แสดง {bp['n_preview']} จาก {bp['n_total']} แถว)"
-            fig.update_layout(
-                title=f"Actual vs Predicted{cap}",
-                template="plotly_white", height=400, hovermode="x unified",
+    if st.button("🔍 สั่ง AI สแกนข้อมูลและวางแผนวิเคราะห์เชิงลึก", type="primary", use_container_width=True):
+        with st.spinner("AI กำลังอ่านโครงสร้างดาต้าเบสของมึงเพื่อคำนวณหน้างาน..."):
+            schema_info = f"Columns: {df.columns.tolist()}\nDtypes:\n{df.dtypes.to_string()}\nSample Head:\n{df.head(3).to_string()}"
+            strategy_prompt = (
+                f"คุณคือนักสถิติประยุกต์และ AI Agent อัจฉริยะขั้นสูง นี่คือข้อมูลจริงของผู้ใช้งาน:\n{schema_info}\n\n"
+                f"จงวิเคราะห์ข้อเท็จจริงของชุดข้อมูลนี้อย่างตรงไปตรงมา และแนะนำแนวทางการวิเคราะห์เชิงลึกที่เหมาะสม "
+                f"โดยเขียนหัวข้อข้อเสนอแนะออกมาเป็นข้อๆ 3 ข้อที่ระบุชื่อตัวแปรจริงในดาต้าเซ็ตให้ชัดเจน (เช่น หากเจอข้อมูลโรคพืชหรือข้อมูลเกษตร ให้เสนอการทดสอบสถิติหรือโมเดลที่สอดคล้องกับตัวแปรนั้นจริงๆ ไม่ใช่การรันสูตรโมเดลทั่วไปแบบสุ่มสี่สุ่มห้า)"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.session_state["ai_agent_suggestions"] = call_gemini(strategy_prompt)
+
+    if st.session_state["ai_agent_suggestions"]:
+        st.info(st.session_state["ai_agent_suggestions"])
+
+    st.markdown("---")
+    st.subheader("💻 Live AI Code Interpreter Console")
+    st.write("พิมพ์สั่งงานภาษาไทย หรือบอกเป้าหมายวิเคราะห์ที่มึงต้องการได้เลยเว้ยตอง เดี๋ยว AI จะเขียนโค้ดสถิติ/พล็อตกราฟมารันสดให้ดูบนหน้าจอนี้ทันที!")
+
+    user_instruction = st.text_area(
+        "ระบุคำสั่งวิเคราะห์ที่มึงต้องการให้ทำ (เช่น: 'ช่วยพล็อตกราฟแท่งกระจายตัวแปรกลุ่ม และรันสถิติ Chi-Square หรือโมเดลที่แมทช์ที่สุดเพื่อดูผลกระทบต่อโรคพืช')",
+        placeholder="พิมพ์โจทย์คณิตศาสตร์/สถิติ/กราฟ ที่มึงอยากเห็นตรงนี้เลย..."
+    )
+
+    if st.button("⚡ สั่ง AI ประมวลผลและสร้างชิ้นงานสด", type="secondary", use_container_width=True):
+        if not user_instruction:
+            st.error("มึงพิมพ์คำสั่งบอกกูก่อนดิตอง 55"); st.stop()
+            
+        with st.spinner("Gemini กำลังเขียนโค้ดประมวลผลสถิติสด..."):
+            schema_context = f"Columns: {df.columns.tolist()}\nDtypes:\n{df.dtypes.to_string()}\nHead:\n{df.head(2).to_string()}"
+            code_prompt = (
+                f"คุณคือสุดยอด AI Code Interpreter หน้าที่ของคุณคือเขียนโค้ด Python เพื่อพล็อตกราฟและคำนวณสถิติลงบนหน้าจอ Streamlit ของผู้ใช้\n"
+                f"นี่คือชุดข้อมูลจริงที่มีอยู่: {schema_context}\n"
+                f"คำสั่งวิเคราะห์ที่ผู้ใช้ต้องการ: '{user_instruction}'\n\n"
+                f"⚠️ กฎเหล็กในการเขียนโค้ด:\n"
+                f"1. ตัวแปร DataFrame หลักในระบบมีชื่อว่า `df` (มีอยู่แล้ว ห้ามโหลดไฟล์ใหม่หรือจำลองข้อมูลใหม่เด็ดขาด)\n"
+                f"2. คุณสามารถใช้คลังคำสั่งได้แค่: `st`, `pd`, `np`, `px`, `go`, `sp_stats` (scipy.stats) และ `sm` (statsmodels)\n"
+                f"3. จงเขียนกระบวนการจัดการข้อมูล (เช่น การแปลงประเภทตัวแปร การเข้ารหัส One-Hot คัดกรองคอลัมน์ที่ไม่เกี่ยวเช่น ID ออก) และการเลือกใช้สูตรโมเดลทางคณิตศาสตร์ให้สอดคล้องและถูกต้องตามคำสั่งของผู้ใช้อย่างสมบูรณ์แบบร้อยเปอร์เซ็นต์\n"
+                f"4. ใช้ `st.plotly_chart(fig, use_container_width=True)` ในการแสดงผลกราฟ\n"
+                f"5. ส่งกลับผลลัพธ์มาเฉพาะบล็อกโค้ดในรูปแบบเครื่องหมาย ```python ... ``` เท่านั้น ห้ามเขียนอธิบายเรื่องอื่นนอกกรอบโค้ดเด็ดขาด!\n"
+                f"6. ทุกครั้งที่ใช้ `fig.update_layout()` มึงจำเป็นต้องระบุชื่อแกนและชื่อหัวเรื่องให้ครบถ้วนเสมอ โดยดึงชื่อตัวแปรจริงมาใส่ เช่น `title='การทำนายผลลัพธ์ของเป้าหมาย ตัวแปร Y'`, `xaxis_title='แกนข้อมูล X (ระบุชื่อตัวแปรตามจริง)'`, `yaxis_title='แกนข้อมูล Y (ระบุชื่อตัวแปรตามจริง)'` ห้ามปล่อยให้แกนแสดงผลแค่ตัวเลขดัชนีเปล่าๆ โล่งๆ เป็นอันขาด!"
+            )
+            
+            ai_raw_code = call_gemini(code_prompt)
+            
+            cleaned_code = ""
+            if "```python" in ai_raw_code:
+                cleaned_code = ai_raw_code.split("```python")[1].split("```")[0]
+            elif "```" in ai_raw_code:
+                cleaned_code = ai_raw_code.split("```")[1].split("```")[0]
+            else:
+                cleaned_code = ai_raw_code
+
+            st.markdown("### 📊 Live Analysis Output")
+            
+            execution_scope = {
+                "st": st,
+                "pd": pd,
+                "np": np,
+                "px": px,
+                "go": go,
+                "sp_stats": sp_stats,
+                "sm": sm,
+                "df": df
+            }
+            
+            try:
+                exec(cleaned_code, globals(), execution_scope)
+                st.success("🎯 AI Agent รันคำนวณคณิตศาสตร์และสร้างชิ้นงานสำเร็จ!")
+                with st.expander("🛠️ เปิดดู Source Code หลังบ้านที่ AI เขียนขึ้นมาสดๆ"):
+                    st.code(cleaned_code, language="python")
+            except Exception as runtime_err:
+                st.error(f"❌ โค้ดสถิติแครชเนื่องจาก: {runtime_err}")
+                st.markdown("ลองเปลี่ยนคำสั่งระบุเจาะจงชื่อคอลัมน์ให้ชัดขึ้นดูมึง")
+                with st.expander("ดูโค้ดที่มีปัญหา"):
+                    st.code(cleaned_code, language="python")
 
 
 # ═════════════════════════════════════════════
@@ -779,17 +642,12 @@ elif "6." in page:
 
     if st.button("🚀 Generate AI Report", type="primary", use_container_width=True):
         with st.spinner("Gemini กำลังเขียนรายงาน…"):
-            ml    = st.session_state.get("ml_results")
             stats = st.session_state.get("stats_results")
             col_m = st.session_state.get("ai_column_meanings", "—")
 
             ctx_parts = [f"- Column analysis: {col_m[:300]}"]
             if stats:
                 ctx_parts.append(f"- OLS R² on `{stats['target']}`: {stats['r2']:.4f}")
-            if ml:
-                ctx_parts.append(
-                    f"- Best ML model: {ml['best_name']} (R²={ml['best_r2']:.4f})"
-                )
             context = "\n".join(ctx_parts)
 
             prompt = (
