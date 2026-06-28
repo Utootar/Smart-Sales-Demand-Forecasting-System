@@ -90,7 +90,7 @@ def _get_gemini():
     """
     Initialise Gemini once per process lifetime.
     Key MUST live in .streamlit/secrets.toml:
-        GEMINI_API_KEY = "AQ.Ab8RN6KoBXDSuOJpw2XEtMk-VH0KXuVBbgF51cFLt5jBmaSA7w"
+        GEMINI_API_KEY = ""
     Never hardcode credentials in source.
     """
     try:
